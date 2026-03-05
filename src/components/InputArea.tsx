@@ -78,8 +78,8 @@ const InputArea = () => {
       // 3. Programmatically navigate to the new chat page
       router.push(`/chat/${newChatId}`);
 
-      // 4. Send message with Gemini (will add the response)
-      await sendMessageWithGemini(newChatId, userInput, true);
+      // 4. Send message with Gemini (skip adding user msg — createChat already added it)
+      await sendMessageWithGemini(newChatId, userInput, true, true);
 
       // We can even clear the form/text input after submission if desired
       setTextInput('');

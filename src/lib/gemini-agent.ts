@@ -234,9 +234,14 @@ class GeminiAgent {
 
         // If we have function responses, send them back and get final response
         if (functionResponses.length > 0) {
-          const functionCallResult = await chat.sendMessage({
-            functionResponse: functionResponses,
-          });
+          const functionCallResult = await chat.sendMessage(
+            functionResponses.map((fr) => ({
+              functionResponse: {
+                name: fr.name,
+                response: fr.response,
+              },
+            }))
+          );
           responseText = functionCallResult.response.text();
         }
       } else {
@@ -358,9 +363,14 @@ class GeminiAgent {
 
         // Stream the final response after function calls
         if (functionResponses.length > 0) {
-          const finalResult = await chat.sendMessageStream({
-            functionResponse: functionResponses,
-          });
+          const finalResult = await chat.sendMessageStream(
+            functionResponses.map((fr) => ({
+              functionResponse: {
+                name: fr.name,
+                response: fr.response,
+              },
+            }))
+          );
           
           for await (const chunk of finalResult.stream) {
             const chunkText = chunk.text();

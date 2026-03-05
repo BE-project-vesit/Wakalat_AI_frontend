@@ -24,7 +24,7 @@ interface ChatState {
   addMessage: (chatId: string, message: Message) => void;
   setActiveChatId: (chatId: string | null) => void;
   markMessageAsStreamed: (chatId: string, messageIndex: number) => void;
-  sendMessageWithGemini: (chatId: string, userMessage: string, useStreaming?: boolean) => Promise<void>;
+  sendMessageWithGemini: (chatId: string, userMessage: string, useStreaming?: boolean, skipAddUserMessage?: boolean) => Promise<void>;
   updateStreamingMessage: (chatId: string, messageIndex: number, content: string) => void;
 }
 
@@ -150,12 +150,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  sendMessageWithGemini: async (chatId, userMessage, useStreaming = true) => {
-    // Add user message to local state
-    get().addMessage(chatId, { role: 'User', content: userMessage });
-
-    // Persist user message to DB
-    persistMessageToDB(chatId, 'User', userMessage, true);
+  sendMessageWithGemini: async (chatId, userMessage, useStreaming = true, skipAddUserMessage = false) => {
+    // Add user message to local state (skip if caller already added it, e.g. createChat)
+    if (!skipAddUserMessage) {
+      get().addMessage(chatId, { role: 'User', content: userMessage });
+      persistMessageToDB(chatId, 'User', userMessage, true);
+    }
 
     // Get conversation history (exclude the user message we just added — it's the last one)
     const chat = get().chats.find((c) => c.id === chatId);
