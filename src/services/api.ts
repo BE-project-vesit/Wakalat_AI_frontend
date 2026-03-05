@@ -4,7 +4,7 @@
 import type { CaseInput, CaseAnalysisResponse, ApiResponse, RelatedCaseLaw, LegalAction } from '@/types/api';
 
 // Configuration
-const MOCK_MODE = true; // Set to false when backend is ready
+const MOCK_MODE = false; // Set to false when backend is ready
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
 
 // Mock delay to simulate network latency

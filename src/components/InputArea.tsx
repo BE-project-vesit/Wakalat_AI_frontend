@@ -19,10 +19,11 @@ const InputArea = () => {
   // --- NEW: Get the router and the createChat action from our stores ---
   const router = useRouter();
   const createChat = useChatStore((state) => state.createChat);
+  const sendMessageWithGemini = useChatStore((state) => state.sendMessageWithGemini);
   const formState = useFormStore(); // Fixed: Subscribe to form state changes
 
   // --- REWRITTEN: The new, unified submit logic ---
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     setIsLoading(true);
     let userInput = '';
     let chatTitle = '';
@@ -70,17 +71,24 @@ const InputArea = () => {
         : `Documents: ${documents.length} files`;
     }
 
-    // 2. Create the new chat in our Zustand store
-    // The createChat function will add the user message and the mock model response
-    const newChatId = createChat(userInput, chatTitle);
+    try {
+      // 2. Create the new chat in our Zustand store (without response yet)
+      const newChatId = createChat(userInput, chatTitle);
 
-    // 3. Programmatically navigate to the new chat page
-    // This happens instantly without a page reload, giving the Gemini-like feel
-    router.push(`/chat/${newChatId}`);
-    
-    // We can even clear the form/text input after submission if desired
-    setTextInput('');
-    // You could add a formState.reset() method here as well
+      // 3. Programmatically navigate to the new chat page
+      router.push(`/chat/${newChatId}`);
+
+      // 4. Send message with Gemini (will add the response)
+      await sendMessageWithGemini(newChatId, userInput, true);
+
+      // We can even clear the form/text input after submission if desired
+      setTextInput('');
+    } catch (error) {
+      console.error('Error submitting case:', error);
+      toast.error('Failed to submit case. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
   };
   
   // --- (The rest of the component's JSX remains largely the same) ---

@@ -12,23 +12,31 @@ export default function ChatPage() {
   const id = params.id as string;
   
   // --- NEW: Get data and actions from our chat store ---
-  const { chats, addMessage, setActiveChatId, markMessageAsStreamed } = useChatStore();
+  const { chats, sendMessageWithGemini, setActiveChatId, markMessageAsStreamed } = useChatStore();
   const chat = chats.find(c => c.id === id);
 
   const [newMessage, setNewMessage] = useState('');
+  const [isSending, setIsSending] = useState(false);
 
   useEffect(() => {
     setActiveChatId(id);
     return () => setActiveChatId(null); // Clear active chat when leaving page
   }, [id, setActiveChatId]);
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim()) return;
+    if (!newMessage.trim() || isSending) return;
 
-    // Add the user's message and the mock response via the store action
-    addMessage(id, { role: 'User', content: newMessage });
-    setNewMessage('');
+    setIsSending(true);
+    try {
+      // Use Gemini with MCP integration
+      await sendMessageWithGemini(id, newMessage.trim(), true);
+      setNewMessage('');
+    } catch (error) {
+      console.error('Error sending message:', error);
+    } finally {
+      setIsSending(false);
+    }
   };
 
   if (!chat) {
@@ -89,7 +97,7 @@ export default function ChatPage() {
                 <button
                     type="submit"
                     className="absolute right-4 top-1/2 -translate-y-1/2 p-2 bg-amber-600 hover:bg-amber-700 rounded-full disabled:bg-stone-300 dark:disabled:bg-zinc-700 disabled:cursor-not-allowed transition-colors"
-                    disabled={!newMessage.trim()}
+                    disabled={!newMessage.trim() || isSending}
                 >
                     <ArrowUp size={20} className="text-white" />
                 </button>

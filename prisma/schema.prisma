@@ -1,0 +1,42 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// Existing table used by the backend for case law vector search — do not modify
+model documents {
+  id        BigInt                 @id @default(autoincrement())
+  content   String?
+  embedding Unsupported("vector")?
+  metadata  Json?
+
+  @@index([embedding])
+}
+
+model Chat {
+  id        String    @id @default(uuid())
+  title     String
+  userId    String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+
+  @@map("chats")
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  chatId    String
+  role      String
+  content   String
+  isStreamed Boolean  @default(false)
+  createdAt DateTime @default(now())
+  chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@index([chatId])
+  @@map("messages")
+}
