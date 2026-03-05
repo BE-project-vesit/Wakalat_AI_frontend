@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "wakalat-ai": {
+      "type": "sse",
+      "url": "https://wakalat-ai-backend.onrender.com/sse",
+      "headers": {
+        "Authorization": "Bearer <your-token-here>"
+      }
+    },
+    "wakalat-ai-local": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "main.py"
+      ],
+      "cwd": "F:/code n shit/Wakalat/Wakalat-AI-Backend"
+    }
+  }
+}
