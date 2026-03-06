@@ -6,7 +6,7 @@ import { runLegalAssistant } from '@/lib/legal-assistant';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { message, conversationHistory, useMCPTools = true } = body;
+    const { message, conversationHistory, useMCPTools = true, maxToolIterations, attachments } = body;
 
     if (!message) {
       return NextResponse.json(
@@ -28,6 +28,8 @@ export async function POST(request: NextRequest) {
       message,
       conversationHistory: conversationHistory || [],
       useMCPTools,
+      maxToolIterations,
+      attachments,
     });
 
     return NextResponse.json({

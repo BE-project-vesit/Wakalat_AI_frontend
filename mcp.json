@@ -4,7 +4,7 @@
       "type": "sse",
       "url": "https://wakalat-ai-backend.onrender.com/sse",
       "headers": {
-        "Authorization": "Bearer <your-token-here>"
+        "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJwYXJ0aHdhbmphcmkwN0BnbWFpbC5jb20iLCJpYXQiOjE3NzI3NTMwODQsImV4cCI6MTc3NTM0NTA4NCwidHlwZSI6ImFjY2VzcyJ9.B_cp_rojFBFR5OZRW6RSXUOujF_vSgDM4Y5UVDbn9kA"
       }
     },
     "wakalat-ai-local": {

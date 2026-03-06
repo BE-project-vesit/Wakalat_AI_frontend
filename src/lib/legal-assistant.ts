@@ -6,11 +6,33 @@ export interface ConversationMessage {
   content: string;
 }
 
+export interface ToolCallEvent {
+  type: 'tool_call_start' | 'tool_call_end';
+  tool: string;
+  args?: Record<string, any>;
+  success?: boolean;
+  error?: string;
+  durationMs?: number;
+}
+
+export interface StreamEvent {
+  type: 'log' | 'text' | 'done' | 'error';
+  data: ToolCallEvent | { content: string } | { error: string } | Record<string, never>;
+}
+
+export interface FileAttachment {
+  name: string;
+  mimeType: string;
+  base64Data: string;
+}
+
 export interface AssistantRunOptions {
   message: string;
   conversationHistory?: ConversationMessage[];
   useMCPTools?: boolean;
   maxToolIterations?: number;
+  attachments?: FileAttachment[];
+  onEvent?: (event: StreamEvent) => void;
 }
 
 export interface AssistantRunResult {
@@ -44,7 +66,7 @@ IMPORTANT RULES:
 
 const TOOL_INSTRUCTIONS = `
 
-MCP TOOLS ARE ACTIVE — USE THEM.
+MCP TOOLS ARE ACTIVE — USE THEM. You can call tools MULTIPLE TIMES across multiple steps.
 
 MANDATORY: When the user's query matches a tool, you MUST call it. Do not answer from memory alone.
 - Precedent/case law questions → call search_precedents or find_case_laws
@@ -53,7 +75,49 @@ MANDATORY: When the user's query matches a tool, you MUST call it. Do not answer
 - Draft a notice → call draft_legal_notice
 - Limitation period questions → call check_limitation
 
-After receiving tool results, synthesize them into a clear, structured response. Mention which tool you used.`;
+WORKFLOW FOR GUIDED FORM SUBMISSIONS:
+When you receive a "GUIDED FORM SUBMISSION", you MUST run a multi-step analysis. Do NOT stop after one tool call.
+
+For CRIMINAL cases:
+1. Call legal_research on the applicable sections and offence type
+2. Call search_precedents for similar cases and defenses
+3. Call check_limitation for filing deadlines
+4. Synthesize everything into a comprehensive case analysis
+
+For CIVIL cases:
+1. Call legal_research on the type of dispute and relief sought
+2. Call search_precedents for similar disputes and outcomes
+3. Call check_limitation for the applicable limitation period
+4. Synthesize into an analysis with recommended strategy
+
+For CYBERCRIME cases:
+1. Call legal_research on IT Act provisions and applicable IPC sections
+2. Call search_precedents for similar cyber offence cases
+3. Call check_limitation for complaint/FIR filing deadlines
+4. Synthesize with technical-legal analysis
+
+For FAMILY cases:
+1. Call legal_research on the grounds for petition and applicable family law provisions
+2. Call search_precedents for similar family matters (custody, maintenance, divorce grounds)
+3. Call check_limitation for petition filing deadlines
+4. Synthesize with analysis of rights, remedies, and likely outcomes
+
+For ANY case type — after the analysis, if the case warrants a legal notice, also call draft_legal_notice.
+
+IMPORTANT RULES FOR TOOL CALLS:
+- Execute each step sequentially. After receiving results from one tool, use those results to inform the next tool call.
+- Keep tool queries SHORT and FOCUSED. For example, use "divorce cruelty Hindu Marriage Act" not a 3-paragraph query.
+- Use research_depth "basic" or "standard" — NEVER "comprehensive" (it causes timeouts).
+- If a tool call FAILS or times out, do NOT retry the same tool. Move on to the next step and note the failure.
+- Do NOT skip steps — if one tool fails, still call the remaining tools.
+
+After ALL tool calls, synthesize everything into a structured response with:
+- Case Summary
+- Applicable Laws & Provisions
+- Relevant Precedents
+- Limitation Period
+- Recommended Legal Strategy
+- Disclaimer`;
 
 const NO_TOOLS_MESSAGE = `
 
@@ -74,7 +138,8 @@ function buildUserPrompt(userMessage: string, hasTools: boolean): string {
 }
 
 export async function runLegalAssistant(options: AssistantRunOptions): Promise<AssistantRunResult> {
-  const { message, conversationHistory = [], useMCPTools = true } = options;
+  const { message, conversationHistory = [], useMCPTools = true, maxToolIterations = 5, onEvent } = options;
+  const emit = (event: StreamEvent) => onEvent?.(event);
 
   const geminiAgent = getGeminiAgent();
   if (!geminiAgent.isConfigured()) {
@@ -106,33 +171,72 @@ export async function runLegalAssistant(options: AssistantRunOptions): Promise<A
     console.log(`[Legal Assistant] MCP not available. connected=${isMCPConnected}, useMCPTools=${useMCPTools}`);
   }
 
+  // Extract text content from MCP tool result
+  const extractMCPResult = (result: any): any => {
+    // MCP returns { content: [{ type: "text", text: "..." }] }
+    if (result && result.content && Array.isArray(result.content)) {
+      const textParts = result.content
+        .filter((c: any) => c.type === 'text' && c.text)
+        .map((c: any) => c.text);
+      if (textParts.length > 0) {
+        return { result: textParts.join('\n') };
+      }
+    }
+    // Fallback: return as-is
+    return result;
+  };
+
   // Create function call handler
   const functionCallHandler = async (call: GeminiFunctionCall): Promise<any> => {
     if (!toolManager.isConnected()) {
       throw new Error('MCP server is not connected');
     }
 
+    const startTime = Date.now();
+    emit({ type: 'log', data: { type: 'tool_call_start', tool: call.name, args: call.args } });
+
     try {
       console.log(`[Legal Assistant] Calling MCP tool: ${call.name}`, call.args);
-      const result = await toolManager.callTool(call.name, call.args);
+      const rawResult = await toolManager.callTool(call.name, call.args);
+      const result = extractMCPResult(rawResult);
       toolCalls.push({ tool: call.name, arguments: call.args, result });
+      emit({ type: 'log', data: { type: 'tool_call_end', tool: call.name, success: true, durationMs: Date.now() - startTime } });
       return result;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error(`[Legal Assistant] Tool ${call.name} failed:`, error);
       toolCalls.push({ tool: call.name, arguments: call.args, result: { error: errorMessage } });
+      emit({ type: 'log', data: { type: 'tool_call_end', tool: call.name, success: false, error: errorMessage, durationMs: Date.now() - startTime } });
       throw error;
     }
   };
 
   const hasTools = geminiTools.length > 0;
-  const prompt = buildUserPrompt(message, hasTools);
+  const textPrompt = buildUserPrompt(message, hasTools);
+
+  // Build multimodal prompt if attachments are present
+  let prompt: string | any[];
+  if (options.attachments && options.attachments.length > 0) {
+    const parts: any[] = [{ text: textPrompt }];
+    for (const att of options.attachments) {
+      parts.push({
+        inlineData: {
+          mimeType: att.mimeType,
+          data: att.base64Data,
+        },
+      });
+    }
+    prompt = parts;
+  } else {
+    prompt = textPrompt;
+  }
 
   try {
     const response = await geminiAgent.generateResponse(prompt, {
       tools: hasTools ? geminiTools : undefined,
       conversationHistory,
       functionCallHandler: hasTools ? functionCallHandler : undefined,
+      maxIterations: maxToolIterations,
     });
 
     let responseText = response.text || '';

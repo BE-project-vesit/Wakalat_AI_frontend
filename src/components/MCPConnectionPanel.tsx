@@ -15,7 +15,7 @@ type EditingServer = {
 const MCPConnectionPanel: React.FC = () => {
   const {
     status, tools, loadingTools, mcpConfig, activeServer, configLoaded,
-    loadConfig, connectServer, disconnect, checkStatus, fetchTools,
+    loadConfig, saveConfig, connectServer, disconnect, checkStatus, fetchTools,
     addServer, updateServer, removeServer,
   } = useMCPStore();
 
@@ -24,6 +24,9 @@ const MCPConnectionPanel: React.FC = () => {
   const [newServerName, setNewServerName] = useState('');
   const [tokenEmail, setTokenEmail] = useState('');
   const [generatingToken, setGeneratingToken] = useState(false);
+  const [rawConfigText, setRawConfigText] = useState('');
+  const [editingRawConfig, setEditingRawConfig] = useState(false);
+  const [rawConfigError, setRawConfigError] = useState('');
 
   useEffect(() => {
     loadConfig();
@@ -88,15 +91,23 @@ const MCPConnectionPanel: React.FC = () => {
       const data = await res.json();
 
       if (data.success && data.access_token) {
-        // Auto-fill the Authorization header
-        setEditing({
-          ...editing,
-          config: {
-            ...editing.config,
-            headers: { ...editing.config.headers, Authorization: `Bearer ${data.access_token}` },
-          },
-        });
-        toast.success('Token generated and applied!');
+        // Auto-fill the Authorization header and auto-save to mcp.json
+        const updatedConfig = {
+          ...editing.config,
+          headers: { ...editing.config.headers, Authorization: `Bearer ${data.access_token}` },
+        };
+        setEditing({ ...editing, config: updatedConfig });
+
+        // Auto-persist to mcp.json so the token isn't lost
+        const name = editing.isNew ? newServerName.trim() : editing.name;
+        if (name) {
+          if (editing.isNew) {
+            await addServer(name, updatedConfig);
+          } else {
+            await updateServer(name, updatedConfig);
+          }
+        }
+        toast.success('Token generated, applied, and saved to mcp.json!');
       } else {
         toast.error(data.error || 'Failed to generate token');
       }
@@ -500,14 +511,65 @@ const MCPConnectionPanel: React.FC = () => {
                 </div>
               )}
 
-              {/* Raw Config View */}
-              <details className="mt-4">
+              {/* Raw Config Editor */}
+              <details className="mt-4" onToggle={(e) => {
+                if ((e.target as HTMLDetailsElement).open && !editingRawConfig) {
+                  setRawConfigText(JSON.stringify(mcpConfig, null, 2));
+                  setRawConfigError('');
+                }
+              }}>
                 <summary className="text-xs text-stone-500 dark:text-stone-400 cursor-pointer hover:text-stone-700 dark:hover:text-stone-300">
-                  View mcp.json
+                  Edit mcp.json
                 </summary>
-                <pre className="mt-2 p-3 text-[11px] bg-stone-100 dark:bg-zinc-900 rounded border border-stone-200 dark:border-zinc-700 text-stone-700 dark:text-stone-300 overflow-x-auto max-h-48">
-                  {JSON.stringify(mcpConfig, null, 2)}
-                </pre>
+                <div className="mt-2">
+                  <textarea
+                    value={editingRawConfig ? rawConfigText : JSON.stringify(mcpConfig, null, 2)}
+                    onChange={(e) => {
+                      setEditingRawConfig(true);
+                      setRawConfigText(e.target.value);
+                      setRawConfigError('');
+                    }}
+                    className="w-full p-3 text-[11px] bg-stone-100 dark:bg-zinc-900 rounded border border-stone-200 dark:border-zinc-700 text-stone-700 dark:text-stone-300 font-mono resize-y min-h-[120px] max-h-[300px]"
+                    spellCheck={false}
+                  />
+                  {rawConfigError && (
+                    <p className="text-[11px] text-red-500 mt-1">{rawConfigError}</p>
+                  )}
+                  {editingRawConfig && (
+                    <div className="flex gap-2 mt-2">
+                      <button
+                        onClick={async () => {
+                          try {
+                            const parsed = JSON.parse(rawConfigText);
+                            if (!parsed.mcpServers || typeof parsed.mcpServers !== 'object') {
+                              setRawConfigError('Config must have a "mcpServers" object');
+                              return;
+                            }
+                            await saveConfig(parsed);
+                            setEditingRawConfig(false);
+                            setRawConfigError('');
+                            toast.success('mcp.json saved');
+                          } catch (e) {
+                            setRawConfigError(e instanceof SyntaxError ? `Invalid JSON: ${e.message}` : 'Failed to save');
+                          }
+                        }}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium transition-colors"
+                      >
+                        <Save className="w-3 h-3" /> Save mcp.json
+                      </button>
+                      <button
+                        onClick={() => {
+                          setEditingRawConfig(false);
+                          setRawConfigText(JSON.stringify(mcpConfig, null, 2));
+                          setRawConfigError('');
+                        }}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-stone-200 dark:bg-zinc-700 hover:bg-stone-300 dark:hover:bg-zinc-600 text-stone-700 dark:text-stone-300 rounded text-xs font-medium transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </div>
               </details>
             </motion.div>
           </>

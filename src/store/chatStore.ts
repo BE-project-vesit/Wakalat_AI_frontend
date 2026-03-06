@@ -2,17 +2,32 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 
 // --- 1. Define the types for our data ---
+export interface ToolCallLog {
+  tool: string;
+  args?: Record<string, any>;
+  status: 'running' | 'success' | 'error';
+  error?: string;
+  durationMs?: number;
+}
+
 export interface Message {
   id?: string; // DB id (present after persistence)
   role: 'User' | 'Model';
   content: string;
   isStreamed?: boolean;
+  toolCalls?: ToolCallLog[];
 }
 
 export interface Chat {
   id: string;
   title: string;
   messages: Message[];
+}
+
+export interface FileAttachment {
+  name: string;
+  mimeType: string;
+  base64Data: string;
 }
 
 interface ChatState {
@@ -24,8 +39,9 @@ interface ChatState {
   addMessage: (chatId: string, message: Message) => void;
   setActiveChatId: (chatId: string | null) => void;
   markMessageAsStreamed: (chatId: string, messageIndex: number) => void;
-  sendMessageWithGemini: (chatId: string, userMessage: string, useStreaming?: boolean, skipAddUserMessage?: boolean) => Promise<void>;
+  sendMessageWithGemini: (chatId: string, userMessage: string, useStreaming?: boolean, skipAddUserMessage?: boolean, attachments?: FileAttachment[]) => Promise<void>;
   updateStreamingMessage: (chatId: string, messageIndex: number, content: string) => void;
+  updateToolCalls: (chatId: string, messageIndex: number, toolCalls: ToolCallLog[]) => void;
 }
 
 // --- Helper: fire-and-forget DB calls (don't block the UI) ---
@@ -150,7 +166,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  sendMessageWithGemini: async (chatId, userMessage, useStreaming = true, skipAddUserMessage = false) => {
+  updateToolCalls: (chatId, messageIndex, toolCalls) => {
+    set((state) => ({
+      chats: state.chats.map((chat) =>
+        chat.id === chatId
+          ? {
+              ...chat,
+              messages: chat.messages.map((msg, idx) =>
+                idx === messageIndex ? { ...msg, toolCalls } : msg
+              ),
+            }
+          : chat
+      ),
+    }));
+  },
+
+  sendMessageWithGemini: async (chatId, userMessage, useStreaming = true, skipAddUserMessage = false, attachments?) => {
     // Add user message to local state (skip if caller already added it, e.g. createChat)
     if (!skipAddUserMessage) {
       get().addMessage(chatId, { role: 'User', content: userMessage });
@@ -181,7 +212,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const response = await fetch('/api/gemini/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: userMessage, conversationHistory, useMCPTools: true }),
+          body: JSON.stringify({ message: userMessage, conversationHistory, useMCPTools: true, attachments }),
         });
 
         if (!response.ok) throw new Error('Failed to get streaming response');
@@ -189,14 +220,58 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const reader = response.body?.getReader();
         const decoder = new TextDecoder();
         let accumulatedContent = '';
+        let toolCallLogs: ToolCallLog[] = [];
+        let sseBuffer = '';
 
         if (reader) {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            accumulatedContent += chunk;
-            get().updateStreamingMessage(chatId, messageIndex, accumulatedContent);
+            sseBuffer += decoder.decode(value, { stream: true });
+
+            // Parse SSE events from buffer
+            const events = sseBuffer.split('\n\n');
+            sseBuffer = events.pop() || ''; // Keep incomplete event in buffer
+
+            for (const eventBlock of events) {
+              if (!eventBlock.trim()) continue;
+              const lines = eventBlock.split('\n');
+              let eventType = '';
+              let eventData = '';
+
+              for (const line of lines) {
+                if (line.startsWith('event: ')) eventType = line.slice(7);
+                else if (line.startsWith('data: ')) eventData = line.slice(6);
+              }
+
+              if (!eventType || !eventData) continue;
+
+              try {
+                const parsed = JSON.parse(eventData);
+
+                if (eventType === 'log') {
+                  if (parsed.type === 'tool_call_start') {
+                    toolCallLogs = [...toolCallLogs, { tool: parsed.tool, args: parsed.args, status: 'running' }];
+                    get().updateToolCalls(chatId, messageIndex, toolCallLogs);
+                  } else if (parsed.type === 'tool_call_end') {
+                    toolCallLogs = toolCallLogs.map((tc) =>
+                      tc.tool === parsed.tool && tc.status === 'running'
+                        ? { ...tc, status: parsed.success ? 'success' : 'error', error: parsed.error, durationMs: parsed.durationMs }
+                        : tc
+                    );
+                    get().updateToolCalls(chatId, messageIndex, toolCallLogs);
+                  }
+                } else if (eventType === 'text') {
+                  accumulatedContent += parsed.content;
+                  get().updateStreamingMessage(chatId, messageIndex, accumulatedContent);
+                } else if (eventType === 'error') {
+                  accumulatedContent += `\n\nError: ${parsed.error}`;
+                  get().updateStreamingMessage(chatId, messageIndex, accumulatedContent);
+                }
+              } catch {
+                // Skip malformed SSE data
+              }
+            }
           }
         } else {
           accumulatedContent = await response.text();
@@ -213,7 +288,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const response = await fetch('/api/gemini/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: userMessage, conversationHistory, useMCPTools: true }),
+          body: JSON.stringify({ message: userMessage, conversationHistory, useMCPTools: true, attachments }),
         });
 
         if (!response.ok) throw new Error('Failed to get response');

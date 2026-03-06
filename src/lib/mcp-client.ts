@@ -55,7 +55,11 @@ class MCPClientManager {
 
       if (config.type === 'sse') {
         if (!config.url) {
-          throw new Error('SSE config requires a url');
+          throw new Error('SSE config requires a url. Please set the SSE URL in the server config.');
+        }
+        const authHeader = config.headers?.Authorization;
+        if (!authHeader || authHeader === 'Bearer ' || authHeader === 'Bearer <your-token-here>') {
+          throw new Error('SSE config requires a valid Authorization token. Generate one in the MCP connection panel.');
         }
         const headers = config.headers || {};
         transport = new SSEClientTransport(new URL(config.url), {
@@ -109,8 +113,10 @@ class MCPClientManager {
       };
       return this.connectionStatus;
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`[MCP Client] Failed to connect to "${name}":`, errorMessage);
+      const errorMessage = error instanceof Error
+        ? error.message
+        : (typeof error === 'string' ? error : `Connection failed: ${JSON.stringify(error)}`);
+      console.error(`[MCP Client] Failed to connect to "${name}":`, error);
       this.connectionStatus = { connected: false, error: errorMessage };
       return this.connectionStatus;
     }
@@ -153,11 +159,13 @@ class MCPClientManager {
     return this.activeServerName;
   }
 
-  async callTool(toolName: string, args: Record<string, any>): Promise<any> {
+  async callTool(toolName: string, args: Record<string, any>, timeoutMs = 120_000): Promise<any> {
     if (!this.client || !this.connectionStatus.connected) {
       throw new Error('MCP client not connected');
     }
-    return this.client.callTool({ name: toolName, arguments: args });
+    return this.client.callTool({ name: toolName, arguments: args }, undefined, {
+      timeout: timeoutMs,
+    });
   }
 
   async listTools(): Promise<any[]> {

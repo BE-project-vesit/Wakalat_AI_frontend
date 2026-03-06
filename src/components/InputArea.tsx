@@ -6,15 +6,74 @@ import { ArrowUp, LoaderCircle, FileText, BotMessageSquare } from 'lucide-react'
 import { useFormStore } from '../store/formStore';
 import { useChatStore } from '../store/chatStore'; // --- NEW: Import our Chat Store ---
 import GuidedForm from './forms/GuidedForm';
-import DocumentUploadForm from './forms/DocumentUploadForm';
+import DocumentUploadForm, { FileData } from './forms/DocumentUploadForm';
 import toast from 'react-hot-toast';
 
 type InputView = 'text' | 'doc' | 'form';
+
+function serializeFormData(f: ReturnType<typeof useFormStore.getState>): string {
+  const lines: string[] = [`GUIDED FORM SUBMISSION — ${f.caseType?.toUpperCase()} CASE`];
+  lines.push('');
+
+  // Metadata
+  lines.push('== CASE METADATA ==');
+  if (f.firNo) lines.push(`Case/FIR No.: ${f.firNo}`);
+  if (f.jurisdiction) lines.push(`Jurisdiction: ${f.jurisdiction}`);
+  if (f.dateOfIncident) lines.push(`Date of Incident: ${f.dateOfIncident}`);
+  if (f.location) lines.push(`Place of Incident: ${f.location}`);
+
+  // Parties
+  lines.push('');
+  lines.push('== PARTIES INVOLVED ==');
+  lines.push(`Complainant/Petitioner: ${f.complainantName}`);
+  if (f.complainantAge) lines.push(`Age/Occupation: ${f.complainantAge}`);
+  if (f.complainantAddress) lines.push(`Complainant Address: ${f.complainantAddress}`);
+  lines.push(`Respondent/Accused: ${f.respondentName}`);
+  if (f.respondentAddress) lines.push(`Respondent Address: ${f.respondentAddress}`);
+
+  // Case-specific details
+  lines.push('');
+  lines.push('== CASE DETAILS ==');
+
+  if (f.caseType === 'Criminal') {
+    const d = f.criminalDetails;
+    if (d.natureOfOffence) lines.push(`Nature of Offence: ${d.natureOfOffence}`);
+    if (d.sections?.length) lines.push(`Sections Applicable: ${Array.isArray(d.sections) ? d.sections.join(', ') : d.sections}`);
+    if (d.briefDescription) lines.push(`Brief Description: ${d.briefDescription}`);
+  } else if (f.caseType === 'Civil') {
+    const d = f.civilDetails;
+    if (d.typeOfDispute) lines.push(`Type of Dispute: ${d.typeOfDispute}`);
+    if (d.reliefSought) lines.push(`Relief Sought: ${d.reliefSought}`);
+    if (d.claimAmount) lines.push(`Claim Value: ${d.claimAmount}`);
+    if (d.groundsOfDispute) lines.push(`Grounds of Dispute: ${d.groundsOfDispute}`);
+  } else if (f.caseType === 'Cybercrime') {
+    const d = f.cybercrimeDetails;
+    if (d.natureOfCyberOffence) lines.push(`Nature of Cyber Offence: ${d.natureOfCyberOffence}`);
+    if (d.platformInvolved) lines.push(`Affected Platforms: ${d.platformInvolved}`);
+    if (d.modeOfOperation) lines.push(`Mode of Operation: ${d.modeOfOperation}`);
+    if (d.lossDetails) lines.push(`Monetary/Data Loss: ${d.lossDetails}`);
+    if (d.technicalDetails) lines.push(`Technical Details: ${d.technicalDetails}`);
+  } else if (f.caseType === 'Family') {
+    const d = f.familyDetails;
+    if (d.typeOfFamilyMatter) lines.push(`Type of Family Matter: ${d.typeOfFamilyMatter}`);
+    if (d.groundsForPetition) lines.push(`Grounds for Petition: ${d.groundsForPetition}`);
+    if (d.marriageDetails) lines.push(`Marriage Details: ${d.marriageDetails}`);
+    if (d.childrenInfo) lines.push(`Children/Dependents: ${d.childrenInfo}`);
+    if (d.relationshipInvolved) lines.push(`Relation Between Parties: ${d.relationshipInvolved}`);
+    if (d.mainIssues) lines.push(`Main Issues: ${d.mainIssues}`);
+  }
+
+  lines.push('');
+  lines.push('Please conduct a comprehensive legal analysis of this case using all relevant tools.');
+
+  return lines.join('\n');
+}
 
 const InputArea = () => {
   const [activeView, setActiveView] = useState<InputView>('text');
   const [isLoading, setIsLoading] = useState(false);
   const [textInput, setTextInput] = useState('');
+  const [uploadedFiles, setUploadedFiles] = useState<FileData[]>([]);
 
   // --- NEW: Get the router and the createChat action from our stores ---
   const router = useRouter();
@@ -44,31 +103,24 @@ const InputArea = () => {
         setIsLoading(false);
         return;
       }
-      // Simple validation for demonstration
       if (!formState.complainantName || !formState.respondentName) {
          toast.error("Please fill in the Complainant and Respondent names.");
          setIsLoading(false);
          return;
       }
-      userInput = `Guided Form Submission:\n- Case Type: ${formState.caseType}\n- Complainant: ${formState.complainantName}\n- Respondent: ${formState.respondentName}`;
+      userInput = serializeFormData(formState);
       chatTitle = `${formState.caseType} Case`;
     } else { // Document view
-      interface UploadedDocument {
-        name: string;
-      }
-      const uploadedDocs = localStorage.getItem('uploadedDocuments');
-      if (!uploadedDocs || JSON.parse(uploadedDocs).length === 0) {
+      if (uploadedFiles.length === 0) {
         toast.error("Please upload at least one document.");
         setIsLoading(false);
         return;
       }
-      const documents = JSON.parse(uploadedDocs);
-      const docNames = documents.map((d: UploadedDocument) => d.name).join(', ');
-      userInput = `Document Submission: The following documents were uploaded for analysis: ${docNames}`;
-      // Create a better title format: "Document: filename"
-      chatTitle = documents.length === 1 
-        ? `Document: ${documents[0].name}` 
-        : `Documents: ${documents.length} files`;
+      const docNames = uploadedFiles.map(d => d.name).join(', ');
+      userInput = `Please analyze the following uploaded legal document(s): ${docNames}. Provide a comprehensive legal analysis including summary, key provisions, parties involved, potential issues, compliance with Indian legal standards, and recommendations.`;
+      chatTitle = uploadedFiles.length === 1
+        ? `Document: ${uploadedFiles[0].name}`
+        : `Documents: ${uploadedFiles.length} files`;
     }
 
     try {
@@ -79,7 +131,12 @@ const InputArea = () => {
       router.push(`/chat/${newChatId}`);
 
       // 4. Send message with Gemini (skip adding user msg — createChat already added it)
-      await sendMessageWithGemini(newChatId, userInput, true, true);
+      const attachments = activeView === 'doc' ? uploadedFiles.map(f => ({
+        name: f.name,
+        mimeType: f.type,
+        base64Data: f.base64Content,
+      })) : undefined;
+      await sendMessageWithGemini(newChatId, userInput, true, true, attachments);
 
       // We can even clear the form/text input after submission if desired
       setTextInput('');
@@ -147,7 +204,7 @@ const InputArea = () => {
 
         {activeView === 'doc' && (
           <div className="flex flex-col items-center justify-center gap-4">
-            <DocumentUploadForm />
+            <DocumentUploadForm onFilesChange={setUploadedFiles} />
           </div>
         )}
 
