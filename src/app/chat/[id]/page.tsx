@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react';
 import { useParams, notFound, useRouter } from 'next/navigation';
 import { useChatStore } from '@/store/chatStore';
 import ChatMessage from '@/components/ChatMessage';
-import StreamingChatMessage from '@/components/StreamingChatMessage'; // --- NEW: Import streaming component
+import StreamingChatMessage from '@/components/StreamingChatMessage';
+import ToolCallLogs from '@/components/ToolCallLogs';
 import { ArrowUp, Bot } from 'lucide-react';
 
 export default function ChatPage() {
@@ -66,8 +67,11 @@ export default function ChatPage() {
                         </div>
                         <div className="flex-grow text-stone-800 dark:text-[#e3e3e3]">
                             <div className="mb-1 text-sm font-medium text-orange-600 dark:text-orange-400">WAKALAT.AI</div>
-                            <StreamingChatMessage 
-                              content={message.content} 
+                            {message.toolCalls && message.toolCalls.length > 0 && (
+                              <ToolCallLogs toolCalls={message.toolCalls} />
+                            )}
+                            <StreamingChatMessage
+                              content={message.content}
                               onStreamComplete={() => markMessageAsStreamed(id, index)}
                             />
                         </div>
@@ -76,8 +80,19 @@ export default function ChatPage() {
                 );
               }
               
-              // Render regular messages normally
-              return <ChatMessage key={index} role={message.role} content={message.content} />;
+              // Render regular messages normally (with tool logs for model messages)
+              return (
+                <div key={index}>
+                  {isModel && message.toolCalls && message.toolCalls.length > 0 && (
+                    <div className="w-full px-4 md:px-6 lg:px-8 bg-stone-100 dark:bg-[#171717]">
+                      <div className="w-full max-w-4xl mx-auto pl-14">
+                        <ToolCallLogs toolCalls={message.toolCalls} />
+                      </div>
+                    </div>
+                  )}
+                  <ChatMessage role={message.role} content={message.content} />
+                </div>
+              );
             })}
           </div>
         </div>

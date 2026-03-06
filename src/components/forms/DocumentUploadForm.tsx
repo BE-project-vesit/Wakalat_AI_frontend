@@ -4,39 +4,74 @@ import { useState, useCallback } from 'react';
 import { Upload, X, File, CheckCircle2 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
-interface FileWithPreview extends File {
-  preview?: string;
+export interface FileData {
+  name: string;
+  type: string;
+  size: number;
+  base64Content: string;
 }
 
-const DocumentUploadForm = () => {
-  const [files, setFiles] = useState<FileWithPreview[]>([]);
-  const [isDragging, setIsDragging] = useState(false);
+interface DocumentUploadFormProps {
+  onFilesChange: (files: FileData[]) => void;
+}
 
-  const onDrop = useCallback((acceptedFiles: FileWithPreview[]) => {
-    // Only accept PDF, DOC, DOCX files
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const base64 = result.split(',')[1];
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+const DocumentUploadForm = ({ onFilesChange }: DocumentUploadFormProps) => {
+  const [files, setFiles] = useState<File[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isReading, setIsReading] = useState(false);
+
+  const processFiles = useCallback(async (acceptedFiles: File[]) => {
     const validFiles = acceptedFiles.filter(file => {
-      const isValid = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
+      const isValidType = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
         .includes(file.type);
-      if (!isValid) {
+      if (!isValidType) {
         toast.error(`${file.name} is not a valid document file. Please upload PDF or Word documents only.`);
+        return false;
       }
-      return isValid;
+      if (file.size > MAX_FILE_SIZE) {
+        toast.error(`${file.name} exceeds the 10MB size limit.`);
+        return false;
+      }
+      return true;
     });
 
-    if (validFiles.length > 0) {
-      // Store files in localStorage
-      const filesData = validFiles.map(file => ({
-        name: file.name,
-        type: file.type,
-        size: file.size,
-        lastModified: file.lastModified,
-      }));
-      localStorage.setItem('uploadedDocuments', JSON.stringify(filesData));
+    if (validFiles.length === 0) return;
+
+    setIsReading(true);
+    try {
+      const fileDataArray: FileData[] = await Promise.all(
+        validFiles.map(async (file) => ({
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          base64Content: await readFileAsBase64(file),
+        }))
+      );
 
       setFiles(validFiles);
+      onFilesChange(fileDataArray);
       toast.success('Documents uploaded successfully!');
+    } catch {
+      toast.error('Failed to read one or more files.');
+    } finally {
+      setIsReading(false);
     }
-  }, []);
+  }, [onFilesChange]);
 
   const handleDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -59,38 +94,36 @@ const DocumentUploadForm = () => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
-
     const droppedFiles = Array.from(e.dataTransfer.files);
-    onDrop(droppedFiles);
-  }, [onDrop]);
+    processFiles(droppedFiles);
+  }, [processFiles]);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = e.target.files ? Array.from(e.target.files) : [];
-    onDrop(selectedFiles);
-  }, [onDrop]);
+    processFiles(selectedFiles);
+  }, [processFiles]);
 
   const removeFile = useCallback((index: number) => {
     setFiles(prev => {
       const newFiles = [...prev];
       newFiles.splice(index, 1);
-      
-      // Update localStorage
       if (newFiles.length === 0) {
-        localStorage.removeItem('uploadedDocuments');
+        onFilesChange([]);
       } else {
-        const filesData = newFiles.map(file => ({
-          name: file.name,
-          type: file.type,
-          size: file.size,
-          lastModified: file.lastModified,
-        }));
-        localStorage.setItem('uploadedDocuments', JSON.stringify(filesData));
+        // Re-read remaining files (they're still in memory as File objects)
+        Promise.all(
+          newFiles.map(async (file) => ({
+            name: file.name,
+            type: file.type,
+            size: file.size,
+            base64Content: await readFileAsBase64(file),
+          }))
+        ).then(onFilesChange);
       }
-      
       return newFiles;
     });
     toast.success('Document removed');
-  }, []);
+  }, [onFilesChange]);
 
   return (
     <div className="w-full">
@@ -119,7 +152,9 @@ const DocumentUploadForm = () => {
         >
           <Upload className="w-8 h-8 text-stone-500 dark:text-stone-400" />
           <p className="text-stone-500 dark:text-stone-400 text-center">
-            {isDragging ? (
+            {isReading ? (
+              <span className="text-amber-600 dark:text-amber-500">Reading files...</span>
+            ) : isDragging ? (
               <span className="text-amber-600 dark:text-amber-500">Drop your documents here</span>
             ) : (
               <span>
@@ -129,7 +164,7 @@ const DocumentUploadForm = () => {
             )}
           </p>
           <p className="text-xs text-stone-400 dark:text-stone-500">
-            Supports: PDF, DOC, DOCX
+            Supports: PDF, DOC, DOCX (max 10MB each)
           </p>
         </label>
       </div>

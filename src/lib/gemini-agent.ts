@@ -4,6 +4,8 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const MODEL_NAME = 'gemini-2.5-flash'; // Using Gemini 2.5 Flash which supports function calling
 
+const MAX_TOTAL_MS = 300_000; // 5 minute safety timeout for agentic loops
+
 export interface GeminiTool {
   name: string;
   description?: string;
@@ -42,7 +44,7 @@ class GeminiAgent {
    */
   convertMCPToolToGeminiTool(mcpTool: any): GeminiTool {
     const schema = mcpTool.input_schema || mcpTool.inputSchema || {};
-    
+
     // Extract properties from schema
     const properties: Record<string, any> = {};
     const required: string[] = [];
@@ -50,13 +52,20 @@ class GeminiAgent {
     if (schema.properties) {
       Object.keys(schema.properties).forEach((key) => {
         const prop = schema.properties[key];
-        properties[key] = {
+        const converted: Record<string, any> = {
           type: prop.type || 'string',
           description: prop.description || '',
         };
-        if (prop.items) {
-          properties[key].items = prop.items;
+        if (prop.enum) {
+          converted.enum = prop.enum;
         }
+        if (prop.items) {
+          converted.items = prop.items;
+        }
+        if (prop.default !== undefined) {
+          converted.default = prop.default;
+        }
+        properties[key] = converted;
       });
     }
 
@@ -76,22 +85,77 @@ class GeminiAgent {
   }
 
   /**
-   * Generate a response using Gemini with native function calling support
+   * Extract text from a Gemini response, trying multiple methods
+   */
+  private extractText(response: any): string {
+    let text = '';
+    try {
+      text = response.text();
+    } catch (e) {
+      console.warn('[Gemini Agent] response.text() failed, trying alternative:', e);
+    }
+
+    if (!text) {
+      const candidates = (response as any).candidates || [];
+      if (candidates.length > 0) {
+        const firstCandidate = candidates[0];
+        if (firstCandidate.content && firstCandidate.content.parts) {
+          const textParts = firstCandidate.content.parts
+            .filter((part: any) => part.text)
+            .map((part: any) => part.text);
+          text = textParts.join('');
+        }
+      }
+    }
+
+    return text;
+  }
+
+  /**
+   * Extract function calls from a Gemini response, checking both standard and candidate locations
+   */
+  private extractFunctionCalls(response: any): GeminiFunctionCall[] {
+    const rawFunctionCalls = response.functionCalls;
+    const responseFunctionCalls = Array.isArray(rawFunctionCalls) ? rawFunctionCalls : [];
+
+    const candidates = (response as any).candidates || [];
+    let candidateFunctionCalls: any[] = [];
+    if (candidates.length > 0 && candidates[0].content && candidates[0].content.parts) {
+      candidateFunctionCalls = candidates[0].content.parts
+        .filter((part: any) => part.functionCall)
+        .map((part: any) => part.functionCall);
+    }
+
+    // Deduplicate: if both sources return the same calls, prefer response.functionCalls
+    // Use a simple check — if responseFunctionCalls is non-empty, skip candidate ones
+    const allRaw = responseFunctionCalls.length > 0 ? responseFunctionCalls : candidateFunctionCalls;
+
+    return allRaw.map((call: any) => ({
+      name: call.name || call.functionName,
+      args: call.args || {},
+    }));
+  }
+
+  /**
+   * Generate a response using Gemini with agentic multi-step function calling.
+   * Loops until Gemini stops requesting tools or maxIterations is reached.
    */
   async generateResponse(
-    prompt: string,
+    prompt: string | any[],
     context?: {
       tools?: GeminiTool[];
       conversationHistory?: Array<{ role: 'user' | 'model'; content: string }>;
       functionCallHandler?: (call: GeminiFunctionCall) => Promise<any>;
+      maxIterations?: number;
     }
   ): Promise<{ text: string; functionCalls?: GeminiFunctionCall[] }> {
     if (!this.model) {
       throw new Error('Gemini API key not configured. Please set GEMINI_API_KEY environment variable.');
     }
 
+    const maxIterations = context?.maxIterations ?? 5;
+
     try {
-      // Build conversation history
       const chat = this.model.startChat({
         history: (context?.conversationHistory || []).map((msg) => ({
           role: msg.role === 'user' ? 'user' : 'model',
@@ -109,121 +173,37 @@ class GeminiAgent {
         }] : undefined,
       });
 
-      // Send the message
-      const result = await chat.sendMessage(prompt);
-      const response = result.response;
+      // Send the initial message
+      const initialResult = await chat.sendMessage(prompt);
+      let currentResponse = initialResult.response;
+      const allFunctionCalls: GeminiFunctionCall[] = [];
+      const startTime = Date.now();
 
-      // Debug logging - check response structure
-      const finishReason = (response as any).finishReason || 'unknown';
-      const candidates = (response as any).candidates || [];
-      let rawResponseText = '';
-      
-      // Try multiple ways to get the text
-      try {
-        rawResponseText = response.text();
-      } catch (e) {
-        console.warn('[Gemini Agent] response.text() failed, trying alternative:', e);
-      }
-      
-      // If text() returned empty but we have candidates, try extracting from candidates
-      if (!rawResponseText && candidates.length > 0) {
-        const firstCandidate = candidates[0];
-        if (firstCandidate.content && firstCandidate.content.parts) {
-          const textParts = firstCandidate.content.parts
-            .filter((part: any) => part.text)
-            .map((part: any) => part.text);
-          rawResponseText = textParts.join('');
+      // Agentic loop: keep going while Gemini requests tool calls
+      let iteration = 0;
+      while (iteration < maxIterations && (Date.now() - startTime) < MAX_TOTAL_MS) {
+        const roundFunctionCalls = this.extractFunctionCalls(currentResponse);
+
+        console.log(`[Gemini Agent] Iteration ${iteration + 1}: ${roundFunctionCalls.length} function call(s)`);
+
+        if (roundFunctionCalls.length === 0) {
+          // No more tool calls — Gemini is done
+          break;
         }
-      }
-      
-      console.log('[Gemini Agent] Response received:', {
-        hasFunctionCalls: !!(response.functionCalls && response.functionCalls.length > 0),
-        functionCallsCount: response.functionCalls?.length || 0,
-        hasText: !!rawResponseText,
-        textLength: rawResponseText?.length || 0,
-        finishReason: finishReason,
-        candidates: candidates.length,
-      });
-      
-      // Log first candidate details if available
-      if (candidates.length > 0) {
-        const firstCandidate = candidates[0];
-        console.log('[Gemini Agent] First candidate:', {
-          finishReason: firstCandidate.finishReason,
-          hasContent: !!(firstCandidate.content),
-          contentParts: firstCandidate.content?.parts?.length || 0,
-        });
-        
-        // Log the actual content parts
-        if (firstCandidate.content && firstCandidate.content.parts) {
-          console.log('[Gemini Agent] Content parts:', firstCandidate.content.parts.map((part: any) => ({
-            hasText: !!part.text,
-            textLength: part.text?.length || 0,
-            hasFunctionCall: !!part.functionCall,
-            functionCallName: part.functionCall?.name,
-          })));
-        }
-      }
-      
-      if (response.functionCalls && response.functionCalls.length > 0) {
-        console.log('[Gemini Agent] Function calls:', response.functionCalls.map((fc: any) => ({
-          name: fc.name,
-          args: fc.args,
-        })));
-      } else if (context?.tools && context.tools.length > 0) {
-        console.log('[Gemini Agent] No function calls made despite tools being available');
-        console.log('[Gemini Agent] Finish reason:', finishReason);
-        console.log('[Gemini Agent] Available tools:', context.tools.map(t => ({
-          name: t.name,
-          description: t.description?.substring(0, 100),
-        })));
-      }
 
-      // Check for function calls - try multiple locations
-      const functionCalls: GeminiFunctionCall[] = [];
-      let responseText = '';
-      let functionResponses: any[] = [];
+        iteration++;
 
-      // First, try response.functionCalls (standard location)
-      const rawFunctionCalls = response.functionCalls;
-      const responseFunctionCalls = Array.isArray(rawFunctionCalls) ? rawFunctionCalls : [];
-      
-      // Also check candidate parts for function calls (alternative location)
-      let candidateFunctionCalls: any[] = [];
-      if (candidates.length > 0 && candidates[0].content && candidates[0].content.parts) {
-        candidateFunctionCalls = candidates[0].content.parts
-          .filter((part: any) => part.functionCall)
-          .map((part: any) => part.functionCall);
-      }
-      
-      // Combine both sources
-      const allFunctionCalls = [...responseFunctionCalls, ...candidateFunctionCalls];
-      
-      console.log('[Gemini Agent] Function call sources:', {
-        responseFunctionCalls: responseFunctionCalls.length,
-        candidateFunctionCalls: candidateFunctionCalls.length,
-        total: allFunctionCalls.length,
-      });
+        // Execute all function calls for this round
+        const functionResponses: any[] = [];
+        for (const call of roundFunctionCalls) {
+          allFunctionCalls.push(call);
 
-      if (allFunctionCalls.length > 0) {
-        // Handle function calls
-        for (const call of allFunctionCalls) {
-          const functionCall: GeminiFunctionCall = {
-            name: call.name || call.functionName,
-            args: call.args || call.args || {},
-          };
-          functionCalls.push(functionCall);
-
-          // Execute function if handler is provided
           if (context?.functionCallHandler) {
             try {
-              const functionResult = await context.functionCallHandler(functionCall);
-              functionResponses.push({
-                name: call.name,
-                response: functionResult,
-              });
+              const result = await context.functionCallHandler(call);
+              functionResponses.push({ name: call.name, response: result });
             } catch (error) {
-              console.error(`Error executing function ${call.name}:`, error);
+              console.error(`[Gemini Agent] Error executing function ${call.name}:`, error);
               functionResponses.push({
                 name: call.name,
                 response: { error: error instanceof Error ? error.message : 'Unknown error' },
@@ -232,9 +212,9 @@ class GeminiAgent {
           }
         }
 
-        // If we have function responses, send them back and get final response
+        // Send tool results back to Gemini — it may request more tools or give a final answer
         if (functionResponses.length > 0) {
-          const functionCallResult = await chat.sendMessage(
+          const nextResult = await chat.sendMessage(
             functionResponses.map((fr) => ({
               functionResponse: {
                 name: fr.name,
@@ -242,146 +222,49 @@ class GeminiAgent {
               },
             }))
           );
-          responseText = functionCallResult.response.text();
+          currentResponse = nextResult.response;
+        } else {
+          break;
         }
-      } else {
-        // No function calls, just return the text
-        // Use the rawResponseText we already extracted
-        responseText = rawResponseText || '';
-        
-        // If we have tools but no function calls and no text, log a warning
-        if (context?.tools && context.tools.length > 0 && (!responseText || responseText.trim() === '')) {
-          console.warn('[Gemini Agent] Warning: Tools available but no function calls made and no text returned.');
-          console.warn('[Gemini Agent] Available tools:', context.tools.map(t => ({
-            name: t.name,
-            description: t.description?.substring(0, 100),
-            hasParameters: !!t.parameters,
-            parameterCount: t.parameters?.properties ? Object.keys(t.parameters.properties).length : 0,
-          })));
-          console.warn('[Gemini Agent] This might indicate:');
-          console.warn('  1. Tool schema format issue');
-          console.warn('  2. Gemini not recognizing when to use tools');
-          console.warn('  3. Prompt not explicit enough about tool usage');
-          console.warn('  4. Finish reason:', finishReason);
-          
-          // Try to get more info from candidates
-          if (candidates.length > 0) {
-            const candidate = candidates[0];
-            console.warn('[Gemini Agent] Candidate details:', {
-              finishReason: candidate.finishReason,
-              content: candidate.content,
-              safetyRatings: candidate.safetyRatings,
-            });
-          }
+      }
+
+      if (iteration >= maxIterations) {
+        console.warn(`[Gemini Agent] Hit max iterations (${maxIterations}). Returning current response.`);
+      }
+      if ((Date.now() - startTime) >= MAX_TOTAL_MS) {
+        console.warn(`[Gemini Agent] Hit time limit (${MAX_TOTAL_MS}ms). Returning current response.`);
+      }
+
+      let responseText = this.extractText(currentResponse);
+
+      console.log(`[Gemini Agent] Final response: ${responseText?.length || 0} chars, ${allFunctionCalls.length} total tool calls`);
+
+      // If we executed tools but got no synthesized text, ask Gemini to synthesize
+      if ((!responseText || !responseText.trim()) && allFunctionCalls.length > 0) {
+        console.log('[Gemini Agent] No text after tool calls — requesting synthesis');
+        try {
+          const synthesisResult = await chat.sendMessage(
+            'Now synthesize all the tool results above into a comprehensive, structured response for the user. Include all key findings, relevant laws, precedents, and recommendations.'
+          );
+          responseText = this.extractText(synthesisResult.response);
+          console.log(`[Gemini Agent] Synthesis response: ${responseText?.length || 0} chars`);
+        } catch (synthError) {
+          console.error('[Gemini Agent] Synthesis request failed:', synthError);
         }
+      }
+
+      // Log if we had tools but got nothing useful
+      if (context?.tools && context.tools.length > 0 && !responseText?.trim() && allFunctionCalls.length === 0) {
+        console.warn('[Gemini Agent] Warning: Tools available but no function calls made and no text returned.');
+        console.warn('[Gemini Agent] Available tools:', context.tools.map(t => t.name));
       }
 
       return {
         text: responseText || '',
-        functionCalls: functionCalls.length > 0 ? functionCalls : undefined,
+        functionCalls: allFunctionCalls.length > 0 ? allFunctionCalls : undefined,
       };
     } catch (error) {
       console.error('Gemini API error:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Generate a streaming response with function calling support
-   */
-  async *generateStreamingResponse(
-    prompt: string,
-    context?: {
-      tools?: GeminiTool[];
-      conversationHistory?: Array<{ role: 'user' | 'model'; content: string }>;
-      functionCallHandler?: (call: GeminiFunctionCall) => Promise<any>;
-    }
-  ): AsyncGenerator<string, void, unknown> {
-    if (!this.model) {
-      throw new Error('Gemini API key not configured. Please set GEMINI_API_KEY environment variable.');
-    }
-
-    try {
-      const chat = this.model.startChat({
-        history: (context?.conversationHistory || []).map((msg) => ({
-          role: msg.role === 'user' ? 'user' : 'model',
-          parts: [{ text: msg.content }],
-        })),
-        tools: context?.tools && context.tools.length > 0 ? [{
-          functionDeclarations: context.tools.map((tool) => ({
-            name: tool.name,
-            description: tool.description || '',
-            parameters: tool.parameters || {
-              type: SchemaType.OBJECT,
-              properties: {},
-            },
-          })),
-        }] : undefined,
-      });
-
-      const result = await chat.sendMessageStream(prompt);
-      
-      let hasFunctionCalls = false;
-      const functionCalls: GeminiFunctionCall[] = [];
-      const functionResponses: any[] = [];
-
-      for await (const chunk of result.stream) {
-        const chunkText = chunk.text();
-        if (chunkText) {
-          yield chunkText;
-        }
-
-        // Check for function calls
-        if (chunk.functionCalls) {
-          hasFunctionCalls = true;
-          for (const call of chunk.functionCalls) {
-            functionCalls.push({
-              name: call.name,
-              args: call.args || {},
-            });
-          }
-        }
-      }
-
-      // Handle function calls after streaming completes
-      if (hasFunctionCalls && context?.functionCallHandler) {
-        for (const call of functionCalls) {
-          try {
-            const functionResult = await context.functionCallHandler(call);
-            functionResponses.push({
-              name: call.name,
-              response: functionResult,
-            });
-          } catch (error) {
-            console.error(`Error executing function ${call.name}:`, error);
-            functionResponses.push({
-              name: call.name,
-              response: { error: error instanceof Error ? error.message : 'Unknown error' },
-            });
-          }
-        }
-
-        // Stream the final response after function calls
-        if (functionResponses.length > 0) {
-          const finalResult = await chat.sendMessageStream(
-            functionResponses.map((fr) => ({
-              functionResponse: {
-                name: fr.name,
-                response: fr.response,
-              },
-            }))
-          );
-          
-          for await (const chunk of finalResult.stream) {
-            const chunkText = chunk.text();
-            if (chunkText) {
-              yield chunkText;
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Gemini streaming error:', error);
       throw error;
     }
   }
@@ -398,4 +281,3 @@ export function getGeminiAgent(): GeminiAgent {
 }
 
 export default getGeminiAgent();
-
